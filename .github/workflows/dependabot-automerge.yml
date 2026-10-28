@@ -1,0 +1,80 @@
+name: Dependabot auto-merge
+
+# Squash-merges a Dependabot pull request once every workflow run and check on
+# its exact head commit has passed and the branch is up to date with the base.
+# Version updates that cross a major version are left open for review.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  status:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: dependabot-automerge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: >-
+      (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'dependabot/'))
+      || (github.event_name == 'status' && github.event.state == 'success'
+          && startsWith(github.event.branches[0].name, 'dependabot/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Merge when everything on the head commit has passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.event.sha }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+            --jq '[.[] | select(.state == "open" and .user.login == "dependabot[bot]")][0].number // empty')
+          if [ -z "$pr" ]; then echo "No open Dependabot pull request for $SHA."; exit 0; fi
+          read -r head base branch < <(gh pr view "$pr" -R "$REPO" --json headRefOid,baseRefName,headRefName \
+            --jq '"\(.headRefOid) \(.baseRefName) \(.headRefName)"')
+          if [ "$head" != "$SHA" ]; then echo "#$pr has moved on to $head."; exit 0; fi
+
+          others=$(gh api "repos/$REPO/pulls/$pr/commits" \
+            --jq '[.[].author.login // "unknown" | select(. != "dependabot[bot]" and . != "github-actions[bot]")] | unique | join(" ")')
+          if [ -n "$others" ]; then echo "#$pr has commits from $others; leaving it for review."; exit 0; fi
+          messages=$(gh api "repos/$REPO/pulls/$pr/commits" --jq '.[].commit.message')
+          if grep -q "update-type: version-update:semver-major" <<<"$messages"; then
+            echo "#$pr is a major version update; leaving it for review."; exit 0
+          fi
+
+          # Every workflow run and check run on this commit must be finished and green.
+          read -r runs unfinished < <(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" \
+            --jq '"\(.total_count) \([.workflow_runs[] | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))] | length)"')
+          read -r checks open < <(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
+            --jq '"\(.total_count) \([.check_runs[] | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))] | length)"')
+          read -r statuses state < <(gh api "repos/$REPO/commits/$SHA/status" --jq '"\(.total_count) \(.state)"')
+          if [ "$runs" = 0 ] || [ "$unfinished" != 0 ] || [ "$open" != 0 ] || { [ "$statuses" != 0 ] && [ "$state" != success ]; }; then
+            echo "#$pr is not ready: $unfinished of $runs runs and $open of $checks checks unfinished or failing; status $state."
+            exit 0
+          fi
+
+          behind=$(gh api "repos/$REPO/compare/$SHA...$base" --jq .ahead_by)
+          if [ "$behind" != 0 ]; then
+            echo "#$pr is $behind commits behind $base; updating it and re-running its workflows."
+            gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" -f expected_head_sha="$SHA" >/dev/null
+            for _ in $(seq 30); do
+              [ "$(gh pr view "$pr" -R "$REPO" --json headRefOid --jq .headRefOid)" != "$SHA" ] && break
+              sleep 2
+            done
+            # Pushes made with GITHUB_TOKEN start no workflows, so dispatch them.
+            gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" \
+              --jq '[.workflow_runs[] | select(.event == "pull_request" or .event == "workflow_dispatch") | .path] | unique | .[]' |
+              while read -r path; do
+                gh workflow run "$(basename "$path")" -R "$REPO" --ref "$branch" || echo "::warning::Could not dispatch $path"
+              done
+            exit 0
+          fi
+
+          gh pr merge "$pr" -R "$REPO" --squash --delete-branch --match-head-commit "$SHA"
