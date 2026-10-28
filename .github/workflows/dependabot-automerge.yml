@@ -84,8 +84,12 @@ jobs:
             if [ "$runs" != 0 ] && [ "$pending" = 0 ] && [ "$cpending" = 0 ] && { [ "$statuses" = 0 ] || [ "$sstate" = success ]; }; then
               behind=$(gh api "repos/$REPO/compare/$head...$base" --jq .ahead_by)
               if [ "$behind" = 0 ]; then
-                gh pr merge "$PR" -R "$REPO" --squash --delete-branch --match-head-commit "$head"
-                exit 0
+                if gh pr merge "$PR" -R "$REPO" --squash --delete-branch --match-head-commit "$head"; then exit 0; fi
+                # Usually another pull request merged first; look again.
+                echo "#$PR could not be merged yet; re-checking."
+                updated=yes
+                sleep 15
+                continue
               fi
               echo "#$PR is $behind commits behind $base; updating it and re-running its workflows."
               gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f expected_head_sha="$head" >/dev/null
