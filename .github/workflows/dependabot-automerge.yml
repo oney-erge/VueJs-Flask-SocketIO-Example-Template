@@ -1,8 +1,7 @@
 name: Dependabot auto-merge
 
-# Squash-merges a Dependabot pull request once every workflow run, check and
-# status on its current head has passed and the branch is up to date with the
-# base. Version updates that cross a major version are left open for review.
+# Merges passing Dependabot pull requests; the logic lives in
+# oney-erge/.github/.github/workflows/dependabot-automerge.yml.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -34,85 +33,7 @@ jobs:
       || (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'dependabot/'))
       || (github.event_name == 'status' && github.event.state == 'success'
           && startsWith(github.event.branches[0].name, 'dependabot/'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    steps:
-      - name: Merge when everything on the head commit has passed
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ inputs.pr }}
-          SHA: ${{ github.event.workflow_run.head_sha || github.event.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "$PR" ]; then
-            PR=$(gh api "repos/$REPO/commits/$SHA/pulls" \
-              --jq '[.[] | select(.state == "open" and .user.login == "dependabot[bot]")][0].number // empty')
-          fi
-          if [ -z "$PR" ]; then echo "No open Dependabot pull request for this event."; exit 0; fi
-          [ "$(gh pr view "$PR" -R "$REPO" --json author --jq .author.login)" = "app/dependabot" ] || {
-            echo "#$PR is not a Dependabot pull request."; exit 0; }
-
-          # Runs started by this job (or other GITHUB_TOKEN pushes) raise no further
-          # events, so the job waits for them itself, up to the deadline.
-          deadline=$(( $(date +%s) + 65 * 60 ))
-          updated=""
-          while :; do
-            read -r state head base branch < <(gh pr view "$PR" -R "$REPO" --json state,headRefOid,baseRefName,headRefName \
-              --jq '"\(.state) \(.headRefOid) \(.baseRefName) \(.headRefName)"')
-            if [ "$state" != OPEN ]; then echo "#$PR is $state."; exit 0; fi
-
-            others=$(gh api "repos/$REPO/pulls/$PR/commits" \
-              --jq '[.[].author.login // "unknown" | select(. != "dependabot[bot]" and . != "github-actions[bot]")] | unique | join(" ")')
-            if [ -n "$others" ]; then echo "#$PR has commits from $others; leaving it for review."; exit 0; fi
-            messages=$(gh api "repos/$REPO/pulls/$PR/commits" --jq '.[].commit.message')
-            if grep -q "update-type: version-update:semver-major" <<<"$messages"; then
-              echo "#$PR is a major version update; leaving it for review."; exit 0
-            fi
-
-            # Runs held for approval (started by a GITHUB_TOKEN push) never execute;
-            # the workflows dispatched for that head stand in for them.
-            read -r runs pending failed < <(gh api "repos/$REPO/actions/runs?head_sha=$head&per_page=100" \
-              --jq '[.workflow_runs[] | select(.conclusion != "action_required")] | "\(length) \([.[] | select(.status != "completed")] | length) \([.[] | select(.status == "completed" and (.conclusion | IN("success", "skipped", "neutral") | not))] | length)"')
-            read -r cpending cfailed < <(gh api "repos/$REPO/commits/$head/check-runs?per_page=100" \
-              --jq '"\([.check_runs[] | select(.status != "completed")] | length) \([.check_runs[] | select(.status == "completed" and (.conclusion | IN("success", "skipped", "neutral") | not))] | length)"')
-            read -r statuses sstate < <(gh api "repos/$REPO/commits/$head/status" --jq '"\(.total_count) \(.state)"')
-            if [ "$failed" != 0 ] || [ "$cfailed" != 0 ] || { [ "$statuses" != 0 ] && [ "$sstate" != success ] && [ "$sstate" != pending ]; }; then
-              echo "#$PR has failing runs, checks or statuses on ${head:0:7}; leaving it."; exit 0
-            fi
-
-            if [ "$runs" != 0 ] && [ "$pending" = 0 ] && [ "$cpending" = 0 ] && { [ "$statuses" = 0 ] || [ "$sstate" = success ]; }; then
-              behind=$(gh api "repos/$REPO/compare/$head...$base" --jq .ahead_by)
-              if [ "$behind" = 0 ]; then
-                if gh pr merge "$PR" -R "$REPO" --squash --delete-branch --match-head-commit "$head"; then exit 0; fi
-                # Usually another pull request merged first; look again.
-                echo "#$PR could not be merged yet; re-checking."
-                updated=yes
-                sleep 15
-                continue
-              fi
-              echo "#$PR is $behind commits behind $base; updating it and re-running its workflows."
-              if ! gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f expected_head_sha="$head" >/dev/null; then
-                echo "::notice::#$PR conflicts with $base. Dependabot rebases it on its own unless it carries other commits; then comment '@dependabot recreate'."
-                exit 0
-              fi
-              for _ in $(seq 30); do
-                [ "$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq .headRefOid)" != "$head" ] && break
-                sleep 2
-              done
-              # Pushes made with GITHUB_TOKEN start no workflows, so dispatch them.
-              gh api "repos/$REPO/actions/runs?head_sha=$head&per_page=100" \
-                --jq '[.workflow_runs[] | select(.event == "pull_request" or .event == "workflow_dispatch") | .path] | unique | .[]' |
-                while read -r path; do
-                  gh workflow run "$(basename "$path")" -R "$REPO" --ref "$branch" || echo "::warning::Could not dispatch $path"
-                done
-              updated=yes
-            elif [ -z "$updated" ] && [ "$head" = "$SHA" ]; then
-              # Still running on the commit that raised this event: its own
-              # completion event will start a fresh evaluation.
-              echo "#$PR is not ready yet; waiting for its remaining workflows."; exit 0
-            fi
-
-            if [ "$(date +%s)" -ge "$deadline" ]; then echo "#$PR did not finish in time; leaving it."; exit 0; fi
-            sleep 30
-          done
+    uses: oney-erge/.github/.github/workflows/dependabot-automerge.yml@main
+    with:
+      pr: ${{ inputs.pr }}
+      sha: ${{ github.event.workflow_run.head_sha || github.event.sha }}
