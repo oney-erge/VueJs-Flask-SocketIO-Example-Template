@@ -16,8 +16,10 @@ permissions:
   checks: read
   statuses: read
 
+# One queue per branch: a newer event for the same pull request replaces a pending
+# one, and events on other branches never cancel it.
 concurrency:
-  group: dependabot-automerge
+  group: dependabot-automerge-${{ github.event.workflow_run.head_branch || github.event.branches[0].name || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -52,8 +54,10 @@ jobs:
           fi
 
           # Every workflow run and check run on this commit must be finished and green.
+          # Runs that GitHub holds for approval (started by this job's own branch
+          # update) never execute; the dispatched runs below stand in for them.
           read -r runs unfinished < <(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" \
-            --jq '"\(.total_count) \([.workflow_runs[] | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))] | length)"')
+            --jq '[.workflow_runs[] | select(.conclusion != "action_required")] | "\(length) \([.[] | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))] | length)"')
           read -r checks open < <(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
             --jq '"\(.total_count) \([.check_runs[] | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))] | length)"')
           read -r statuses state < <(gh api "repos/$REPO/commits/$SHA/status" --jq '"\(.total_count) \(.state)"')
