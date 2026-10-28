@@ -92,7 +92,10 @@ jobs:
                 continue
               fi
               echo "#$PR is $behind commits behind $base; updating it and re-running its workflows."
-              gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f expected_head_sha="$head" >/dev/null
+              if ! gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f expected_head_sha="$head" >/dev/null; then
+                echo "::notice::#$PR conflicts with $base. Dependabot rebases it on its own unless it carries other commits; then comment '@dependabot recreate'."
+                exit 0
+              fi
               for _ in $(seq 30); do
                 [ "$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq .headRefOid)" != "$head" ] && break
                 sleep 2
