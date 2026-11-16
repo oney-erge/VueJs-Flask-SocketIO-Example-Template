@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "repository": {"id": "oney-erge/VueJs-Flask-SocketIO-Example-Template", "owner": "oney-erge", "maintenance": "unclassified", "interfaces": ["browser-ui", "api", "template"]},
+  "capabilities": ["shared-tooling"],
+  "components": [{"id": "client", "root": "client"}, {"id": "server", "root": "server"}],
+  "environment": {"source": "requirements.txt", "checkout": "sparse; expand required paths before running checks"},
+  "checks": {"server": {"argv": ["python", "-m", "pytest", "tests/test_server.py", "-q"], "cwd": ".", "timeout_seconds": 120, "effects": "local-test-files"}},
+  "journeys": [{"id": "generate-and-reconnect", "user_outcome": "Start the sample client and server, exchange an event and reconnect", "checks": ["server"], "additional_evidence_needed": ["fresh generated project", "browser reconnect without duplicate events", "client build"]}],
+  "evidence": {"status": "not-collected-by-repoctl"},
+  "agent": {"instruction_entry": "AGENTS.md", "command_trust": "external-to-repository"}
+}
